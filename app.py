@@ -2,79 +2,119 @@ from flask import Flask, request, jsonify
 import numpy as np
 import pickle
 import os
-import sys
-import traceback
+import requests
 
 app = Flask(__name__)
 
-
 # ==================================================
-# BASE DIRECTORY (FOR RENDER + LOCAL)
+# DIRECTORIES
 # ==================================================
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MODEL_DIR = os.path.join(BASE_DIR, "models")
 
+os.makedirs(MODEL_DIR, exist_ok=True)
 
 # ==================================================
-# SAFE MODEL LOADER
+# GOOGLE DRIVE FILE IDS
 # ==================================================
 
-def load_model(filename):
+DRIVE_MODELS = {
+    "automind_failure_model.pkl": "1iZOMnXwVzcfTkcqTWs1NtLv9iqTynd6B",
+    "automind_scaler.pkl": "1XV1WokgErZ5v0FCtzxIDAl7E0wKP1HjJ",
+    "rul_gb_model.pkl": "14huoYQWYoulSOHZmTun0Sul2mOz7pjaL",
+    "rul_rf_model.pkl": "1VFxAgLswIdH-GAaKkqe2GJO8wi5Lr_Gj",
+    "rul_scaler.pkl": "18AKnDnp4u_vVN8IWWVIiuh6izFNHJJ8z"
+}
+
+
+# ==================================================
+# DOWNLOAD FROM GOOGLE DRIVE
+# ==================================================
+
+def download_from_drive(file_id, filename):
+
+    url = f"https://drive.google.com/uc?export=download&id={file_id}"
     path = os.path.join(MODEL_DIR, filename)
 
-    if not os.path.exists(path):
-        raise FileNotFoundError(f"❌ Model not found: {path}")
+    if os.path.exists(path):
+        print(f"✅ {filename} already exists")
+        return
 
-    try:
-        with open(path, "rb") as f:
-            return pickle.load(f)
+    print(f"⬇️ Downloading {filename}...")
 
-    except Exception as e:
-        print(f"❌ Failed to load {filename}")
-        raise e
+    r = requests.get(url, stream=True)
+
+    if r.status_code != 200:
+        raise Exception(f"Download failed for {filename}")
+
+    with open(path, "wb") as f:
+        for chunk in r.iter_content(1024 * 1024):
+            f.write(chunk)
+
+    print(f"✅ Downloaded {filename}")
 
 
 # ==================================================
-# LOAD ALL MODELS ON START
+# LOAD MODELS
+# ==================================================
+
+def load_models():
+
+    print("🔄 Preparing ML models...")
+
+    # Download all
+    for name, fid in DRIVE_MODELS.items():
+        download_from_drive(fid, name)
+
+    # Load
+    models = {}
+
+    for name in DRIVE_MODELS.keys():
+
+        path = os.path.join(MODEL_DIR, name)
+
+        try:
+            with open(path, "rb") as f:
+                models[name] = pickle.load(f)
+
+            print(f"✅ Loaded {name}")
+
+        except Exception as e:
+            print(f"❌ Failed to load {name}")
+            raise e
+
+    return models
+
+
+# ==================================================
+# INIT MODELS
 # ==================================================
 
 try:
-    print("🔄 Loading ML models...")
+    models = load_models()
 
-    # Failure
-    failure_model = load_model("automind_failure_model.pkl")
-    failure_scaler = load_model("automind_scaler.pkl")
+    failure_model = models["automind_failure_model.pkl"]
+    failure_scaler = models["automind_scaler.pkl"]
 
-    # RUL
-    rul_gb_model = load_model("rul_gb_model.pkl")
-    rul_rf_model = load_model("rul_rf_model.pkl")
-    rul_scaler = load_model("rul_scaler.pkl")
+    rul_gb_model = models["rul_gb_model.pkl"]
+    rul_rf_model = models["rul_rf_model.pkl"]
+    rul_scaler = models["rul_scaler.pkl"]
 
-    print("✅ All models loaded successfully!")
+    print("🚀 All models ready")
 
 except Exception as e:
-    print("🔥 FATAL ERROR: Models not loaded")
-    print(e)
-    sys.exit(1)
+    print("🔥 FATAL ERROR:", e)
+    exit(1)
 
 
 # ==================================================
-# HEALTH CHECK (IMPORTANT FOR RENDER)
+# ROUTES
 # ==================================================
 
-@app.route("/", methods=["GET"])
+@app.route("/")
 def home():
-    return jsonify({
-        "status": "running",
-        "service": "AutoMind ML API",
-        "models_loaded": True
-    })
-
-
-@app.route("/health", methods=["GET"])
-def health():
-    return jsonify({"status": "ok"})
+    return "AutoMind ML API Running 🚗🤖"
 
 
 # ==================================================
@@ -85,12 +125,13 @@ def health():
 def predict_failure():
 
     try:
+
         data = request.get_json()
 
-        if not data or "input" not in data:
-            return jsonify({"error": "Missing input array"}), 400
+        if "input" not in data:
+            return jsonify({"error": "Missing input"}), 400
 
-        arr = np.array(data["input"], dtype=float).reshape(1, -1)
+        arr = np.array(data["input"]).reshape(1, -1)
 
         scaled = failure_scaler.transform(arr)
 
@@ -103,30 +144,25 @@ def predict_failure():
             "confidence": round(prob, 3)
         })
 
-
     except Exception as e:
-        traceback.print_exc()
-
-        return jsonify({
-            "error": "Prediction failed",
-            "details": str(e)
-        }), 500
+        return jsonify({"error": str(e)}), 500
 
 
 # ==================================================
-# RUL (GRADIENT BOOSTING)
+# RUL GB
 # ==================================================
 
 @app.route("/predict/rul/gb", methods=["POST"])
 def predict_rul_gb():
 
     try:
+
         data = request.get_json()
 
-        if not data or "input" not in data:
-            return jsonify({"error": "Missing input array"}), 400
+        if "input" not in data:
+            return jsonify({"error": "Missing input"}), 400
 
-        arr = np.array(data["input"], dtype=float).reshape(1, -1)
+        arr = np.array(data["input"]).reshape(1, -1)
 
         scaled = rul_scaler.transform(arr)
 
@@ -136,30 +172,25 @@ def predict_rul_gb():
             "rul_gb": round(rul, 2)
         })
 
-
     except Exception as e:
-        traceback.print_exc()
-
-        return jsonify({
-            "error": "Prediction failed",
-            "details": str(e)
-        }), 500
+        return jsonify({"error": str(e)}), 500
 
 
 # ==================================================
-# RUL (RANDOM FOREST)
+# RUL RF
 # ==================================================
 
 @app.route("/predict/rul/rf", methods=["POST"])
 def predict_rul_rf():
 
     try:
+
         data = request.get_json()
 
-        if not data or "input" not in data:
-            return jsonify({"error": "Missing input array"}), 400
+        if "input" not in data:
+            return jsonify({"error": "Missing input"}), 400
 
-        arr = np.array(data["input"], dtype=float).reshape(1, -1)
+        arr = np.array(data["input"]).reshape(1, -1)
 
         scaled = rul_scaler.transform(arr)
 
@@ -169,18 +200,12 @@ def predict_rul_rf():
             "rul_rf": round(rul, 2)
         })
 
-
     except Exception as e:
-        traceback.print_exc()
-
-        return jsonify({
-            "error": "Prediction failed",
-            "details": str(e)
-        }), 500
+        return jsonify({"error": str(e)}), 500
 
 
 # ==================================================
-# MAIN (FOR RENDER)
+# MAIN
 # ==================================================
 
 if __name__ == "__main__":
@@ -189,6 +214,5 @@ if __name__ == "__main__":
 
     app.run(
         host="0.0.0.0",
-        port=port,
-        debug=False
+        port=port
     )
