@@ -2,11 +2,14 @@ from flask import Flask, request, jsonify
 import numpy as np
 import pickle
 import os
+import sys
+import traceback
 
 app = Flask(__name__)
 
+
 # ==================================================
-# BASE DIRECTORY (IMPORTANT FOR RENDER)
+# BASE DIRECTORY (FOR RENDER + LOCAL)
 # ==================================================
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -14,44 +17,64 @@ MODEL_DIR = os.path.join(BASE_DIR, "models")
 
 
 # ==================================================
-# LOAD MODELS
+# SAFE MODEL LOADER
 # ==================================================
 
 def load_model(filename):
     path = os.path.join(MODEL_DIR, filename)
 
     if not os.path.exists(path):
-        raise FileNotFoundError(f"Model not found: {path}")
+        raise FileNotFoundError(f"❌ Model not found: {path}")
 
-    with open(path, "rb") as f:
-        return pickle.load(f)
+    try:
+        with open(path, "rb") as f:
+            return pickle.load(f)
 
+    except Exception as e:
+        print(f"❌ Failed to load {filename}")
+        raise e
+
+
+# ==================================================
+# LOAD ALL MODELS ON START
+# ==================================================
 
 try:
-    # Failure prediction
+    print("🔄 Loading ML models...")
+
+    # Failure
     failure_model = load_model("automind_failure_model.pkl")
     failure_scaler = load_model("automind_scaler.pkl")
 
-    # RUL models
+    # RUL
     rul_gb_model = load_model("rul_gb_model.pkl")
     rul_rf_model = load_model("rul_rf_model.pkl")
     rul_scaler = load_model("rul_scaler.pkl")
 
-    print("✅ All ML models loaded successfully")
+    print("✅ All models loaded successfully!")
 
 except Exception as e:
-    print("❌ Error loading models:")
+    print("🔥 FATAL ERROR: Models not loaded")
     print(e)
-    exit(1)
+    sys.exit(1)
 
 
 # ==================================================
-# ROUTES
+# HEALTH CHECK (IMPORTANT FOR RENDER)
 # ==================================================
 
 @app.route("/", methods=["GET"])
 def home():
-    return "AutoMind ML API is Running 🚗🤖"
+    return jsonify({
+        "status": "running",
+        "service": "AutoMind ML API",
+        "models_loaded": True
+    })
+
+
+@app.route("/health", methods=["GET"])
+def health():
+    return jsonify({"status": "ok"})
 
 
 # ==================================================
@@ -64,24 +87,30 @@ def predict_failure():
     try:
         data = request.get_json()
 
-        if "input" not in data:
-            return jsonify({"error": "Missing input"}), 400
+        if not data or "input" not in data:
+            return jsonify({"error": "Missing input array"}), 400
 
-        arr = np.array(data["input"]).reshape(1, -1)
+        arr = np.array(data["input"], dtype=float).reshape(1, -1)
 
         scaled = failure_scaler.transform(arr)
 
-        pred = failure_model.predict(scaled)[0]
+        pred = int(failure_model.predict(scaled)[0])
 
-        prob = failure_model.predict_proba(scaled)[0].max()
+        prob = float(failure_model.predict_proba(scaled)[0].max())
 
         return jsonify({
-            "failure": int(pred),
-            "confidence": round(float(prob), 3)
+            "failure": pred,
+            "confidence": round(prob, 3)
         })
 
+
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        traceback.print_exc()
+
+        return jsonify({
+            "error": "Prediction failed",
+            "details": str(e)
+        }), 500
 
 
 # ==================================================
@@ -94,21 +123,27 @@ def predict_rul_gb():
     try:
         data = request.get_json()
 
-        if "input" not in data:
-            return jsonify({"error": "Missing input"}), 400
+        if not data or "input" not in data:
+            return jsonify({"error": "Missing input array"}), 400
 
-        arr = np.array(data["input"]).reshape(1, -1)
+        arr = np.array(data["input"], dtype=float).reshape(1, -1)
 
         scaled = rul_scaler.transform(arr)
 
-        rul = rul_gb_model.predict(scaled)[0]
+        rul = float(rul_gb_model.predict(scaled)[0])
 
         return jsonify({
-            "rul_gb": round(float(rul), 2)
+            "rul_gb": round(rul, 2)
         })
 
+
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        traceback.print_exc()
+
+        return jsonify({
+            "error": "Prediction failed",
+            "details": str(e)
+        }), 500
 
 
 # ==================================================
@@ -121,25 +156,31 @@ def predict_rul_rf():
     try:
         data = request.get_json()
 
-        if "input" not in data:
-            return jsonify({"error": "Missing input"}), 400
+        if not data or "input" not in data:
+            return jsonify({"error": "Missing input array"}), 400
 
-        arr = np.array(data["input"]).reshape(1, -1)
+        arr = np.array(data["input"], dtype=float).reshape(1, -1)
 
         scaled = rul_scaler.transform(arr)
 
-        rul = rul_rf_model.predict(scaled)[0]
+        rul = float(rul_rf_model.predict(scaled)[0])
 
         return jsonify({
-            "rul_rf": round(float(rul), 2)
+            "rul_rf": round(rul, 2)
         })
 
+
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        traceback.print_exc()
+
+        return jsonify({
+            "error": "Prediction failed",
+            "details": str(e)
+        }), 500
 
 
 # ==================================================
-# MAIN
+# MAIN (FOR RENDER)
 # ==================================================
 
 if __name__ == "__main__":
