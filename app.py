@@ -29,12 +29,18 @@ DRIVE_MODELS = {
 
 
 # ==================================================
-# DOWNLOAD FROM GOOGLE DRIVE
+# GOOGLE DRIVE DOWNLOAD (FIXED)
 # ==================================================
+
+def get_confirm_token(response):
+    for key, value in response.cookies.items():
+        if key.startswith("download_warning"):
+            return value
+    return None
+
 
 def download_from_drive(file_id, filename):
 
-    url = f"https://drive.google.com/uc?export=download&id={file_id}"
     path = os.path.join(MODEL_DIR, filename)
 
     if os.path.exists(path):
@@ -43,14 +49,25 @@ def download_from_drive(file_id, filename):
 
     print(f"⬇️ Downloading {filename}...")
 
-    r = requests.get(url, stream=True)
+    URL = "https://drive.google.com/uc?export=download"
 
-    if r.status_code != 200:
-        raise Exception(f"Download failed for {filename}")
+    session = requests.Session()
+
+    response = session.get(URL, params={"id": file_id}, stream=True)
+
+    token = get_confirm_token(response)
+
+    if token:
+        params = {
+            "id": file_id,
+            "confirm": token
+        }
+        response = session.get(URL, params=params, stream=True)
 
     with open(path, "wb") as f:
-        for chunk in r.iter_content(1024 * 1024):
-            f.write(chunk)
+        for chunk in response.iter_content(32768):
+            if chunk:
+                f.write(chunk)
 
     print(f"✅ Downloaded {filename}")
 
@@ -63,11 +80,10 @@ def load_models():
 
     print("🔄 Preparing ML models...")
 
-    # Download all
+    # Download all models
     for name, fid in DRIVE_MODELS.items():
         download_from_drive(fid, name)
 
-    # Load
     models = {}
 
     for name in DRIVE_MODELS.keys():
@@ -75,13 +91,15 @@ def load_models():
         path = os.path.join(MODEL_DIR, name)
 
         try:
+            print(f"📦 Loading {name}...")
+
             with open(path, "rb") as f:
                 models[name] = pickle.load(f)
 
             print(f"✅ Loaded {name}")
 
         except Exception as e:
-            print(f"❌ Failed to load {name}")
+            print(f"❌ Failed to load {name}: {e}")
             raise e
 
     return models
@@ -92,6 +110,7 @@ def load_models():
 # ==================================================
 
 try:
+
     models = load_models()
 
     failure_model = models["automind_failure_model.pkl"]
@@ -104,6 +123,7 @@ try:
     print("🚀 All models ready")
 
 except Exception as e:
+
     print("🔥 FATAL ERROR:", e)
     exit(1)
 
