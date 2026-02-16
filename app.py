@@ -1,4 +1,4 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import FastAPI, UploadFile, File, HTTPException, Header
 from fastapi.staticfiles import StaticFiles
 import shutil
 import json
@@ -9,6 +9,32 @@ import numpy as np
 import pandas as pd
 import joblib
 import onnxruntime as ort
+
+# ==================================================
+# SECURITY
+# ==================================================
+
+API_KEY = os.getenv("API_KEY")
+
+def verify_key(x_api_key: str = Header(None)):
+    if API_KEY is None:
+        raise HTTPException(status_code=500, detail="Server API key not set")
+
+    if x_api_key != API_KEY:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+
+
+# ==================================================
+# PATH FIX (IMPORTANT FOR RENDER)
+# ==================================================
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+MODEL_DIR = os.path.join(BASE_DIR, "models")
+UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
+OUTPUT_DIR = os.path.join(BASE_DIR, "output")
+
+os.makedirs(UPLOAD_DIR, exist_ok=True)
+os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 
 # ==================================================
@@ -24,14 +50,8 @@ LATEST_HEALTH = None
 
 app = FastAPI(title="AutoMind AI Backend 🚗🤖")
 
-app.mount("/output", StaticFiles(directory="output"), name="output")
-
-UPLOAD_DIR = "uploads"
-OUTPUT_DIR = "output"
-MODEL_DIR = "models"
-
-os.makedirs(UPLOAD_DIR, exist_ok=True)
-os.makedirs(OUTPUT_DIR, exist_ok=True)
+# mount AFTER directory creation
+app.mount("/output", StaticFiles(directory=OUTPUT_DIR), name="output")
 
 
 # ==================================================
@@ -41,15 +61,15 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 print("🔄 Loading Models...")
 
 try:
-    failure_session = ort.InferenceSession("models/multi_failure_model.onnx")
+    failure_session = ort.InferenceSession(os.path.join(MODEL_DIR, "multi_failure_model.onnx"))
     print("✅ Failure Model Loaded")
 except:
     failure_session = None
     print("⚠️ Failure model not loaded")
 
 try:
-    rul_rf_session = ort.InferenceSession("models/rul_rf_model.onnx")
-    rul_gb_session = ort.InferenceSession("models/rul_gb_model.onnx")
+    rul_rf_session = ort.InferenceSession(os.path.join(MODEL_DIR, "rul_rf_model.onnx"))
+    rul_gb_session = ort.InferenceSession(os.path.join(MODEL_DIR, "rul_gb_model.onnx"))
     print("✅ RUL Models Loaded")
 except:
     rul_rf_session = None
@@ -57,14 +77,14 @@ except:
     print("⚠️ RUL models not loaded")
 
 try:
-    scaler = joblib.load("models/automind_scaler.pkl")
+    scaler = joblib.load(os.path.join(MODEL_DIR, "automind_scaler.pkl"))
     print("✅ Failure Scaler Loaded")
 except:
     scaler = None
     print("⚠️ Failure scaler not loaded")
 
 try:
-    rul_scaler = joblib.load("models/rul_scaler.pkl")
+    rul_scaler = joblib.load(os.path.join(MODEL_DIR, "rul_scaler.pkl"))
     print("✅ RUL Scaler Loaded")
 except:
     rul_scaler = None
@@ -93,7 +113,6 @@ RUL_FEATURES = [
     "vibration",
     "brake_pressure",
     "gear_load",
-
     "battery_health",
     "degradation_index",
     "failure_score",
@@ -120,7 +139,6 @@ FIELD_MAP = {
 
 
 def map_fields(data: dict):
-
     mapped = {}
 
     for k, v in data.items():
@@ -132,10 +150,7 @@ def map_fields(data: dict):
 
     for f in FEATURES:
         if f not in mapped:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Missing field: {f}"
-            )
+            raise HTTPException(status_code=400, detail=f"Missing field: {f}")
 
     return mapped
 
@@ -158,7 +173,6 @@ def predict_failure(X_scaled):
         return 0.1, 0.1, 0.1, 0.1
 
     input_name = failure_session.get_inputs()[0].name
-
     outputs = failure_session.run(None, {input_name: X_scaled})
 
     raw = np.array(outputs[0]).flatten()
@@ -204,7 +218,9 @@ def predict_rul(X_scaled):
 # ==================================================
 
 @app.post("/voice")
-async def process_voice(file: UploadFile = File(...)):
+async def process_voice(file: UploadFile = File(...), _: str = Header(None, alias="x-api-key")):
+
+    verify_key(_)
 
     input_path = f"{UPLOAD_DIR}/input.m4a"
 
@@ -222,9 +238,7 @@ async def process_voice(file: UploadFile = File(...)):
         "emotion": emotion,
         "diagnosis": diagnosis,
         "ai_response_text": ai_text,
-        "auto_booking": {
-            "status": "PENDING"
-        }
+        "auto_booking": {"status": "PENDING"}
     }
 
     with open(f"{OUTPUT_DIR}/voice_agent_output.json", "w") as f:
@@ -241,78 +255,34 @@ async def process_voice(file: UploadFile = File(...)):
 
 
 # ==================================================
-# Prediction API Helpers
-# ==================================================
-
-def build_rul_array(df: pd.DataFrame):
-
-    row = df.iloc[0]
-
-    rpm = row["rpm"]
-    temp = row["engine_temp"]
-    volt = row["battery_voltage"]
-    speed = row["speed"]
-    vib = row["vibration"]
-    brake = row["brake_pressure"]
-    gear = row["gear_load"]
-
-    battery_health = 1 - (temp / 150)
-    degradation_index = vib * 0.4
-    failure_score = (temp / 120) * 0.5
-    stress_score = (speed / 150) * 0.6
-
-    return np.array([[
-
-        rpm,
-        temp,
-        volt,
-        speed,
-        vib,
-        brake,
-        gear,
-
-        battery_health,
-        degradation_index,
-        failure_score,
-        stress_score
-
-    ]], dtype=np.float32)
-
-
-# ==================================================
 # Prediction API
 # ==================================================
 
 @app.post("/predict")
-def predict(data: dict):
+def predict(data: dict, _: str = Header(None, alias="x-api-key")):
+
+    verify_key(_)
 
     mapped = map_fields(data)
-
     df = pd.DataFrame([mapped], columns=FEATURES)
 
-    # Scale
     if scaler:
         X_scaled = scaler.transform(df).astype(np.float32)
     else:
         X_scaled = df.values.astype(np.float32)
 
-    # Failure
     engine_p, brake_p, battery_p, gear_p = predict_failure(X_scaled)
-
     final_risk = np.mean([engine_p, brake_p, battery_p, gear_p])
-
     health_score = round((1 - final_risk) * 100, 2)
 
-    # RUL
     if rul_scaler:
-        rul_array = build_rul_array(df)
+        rul_array = np.array([[*df.values[0], 1, 0.1, 0.1, 0.1]], dtype=np.float32)
         rul_scaled = rul_scaler.transform(rul_array)
     else:
         rul_scaled = X_scaled
 
     rul_days = predict_rul(rul_scaled)
 
-    # Risk Label
     if final_risk > 0.6:
         risk = "HIGH"
     elif final_risk > 0.3:
@@ -358,9 +328,6 @@ def home():
 def get_latest_health():
 
     if LATEST_HEALTH is None:
-        return {
-            "status": "empty",
-            "message": "No prediction yet"
-        }
+        return {"status": "empty", "message": "No prediction yet"}
 
     return LATEST_HEALTH
