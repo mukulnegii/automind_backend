@@ -14,6 +14,8 @@ import onnxruntime as ort
 # SECURITY
 # ==================================================
 
+HF_URL = os.getenv("HF_URL", "")
+
 def verify_key(x_api_key: str = Header(None)):
     server_key = os.getenv("API_KEY")
 
@@ -331,8 +333,12 @@ def predict(data: dict, _: str = Header(None, alias="x-api-key")):
 
     global LATEST_HEALTH
     LATEST_HEALTH = result
-    response = requests.post(HF_URL, json=data, timeout=20)
-
+    
+    if HF_URL:
+        try:
+            response = requests.post(HF_URL, json=data, timeout=20)
+        except Exception as e:
+            print(f"⚠️ Failed to post to HF_URL: {e}")
     return result
 
 
