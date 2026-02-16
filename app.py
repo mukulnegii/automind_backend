@@ -1,4 +1,4 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException, Header
+from fastapi import FastAPI, UploadFile, File, HTTPException, Header, requests
 from fastapi.staticfiles import StaticFiles
 import shutil
 import json
@@ -331,6 +331,7 @@ def predict(data: dict, _: str = Header(None, alias="x-api-key")):
 
     global LATEST_HEALTH
     LATEST_HEALTH = result
+    response = requests.post(HF_URL, json=data, timeout=20)
 
     return result
 
