@@ -14,14 +14,15 @@ import onnxruntime as ort
 # SECURITY
 # ==================================================
 
-API_KEY = os.getenv("API_KEY")
-
 def verify_key(x_api_key: str = Header(None)):
-    if API_KEY is None:
+    server_key = os.getenv("API_KEY")
+
+    if server_key is None:
         raise HTTPException(status_code=500, detail="Server API key not set")
 
-    if x_api_key != API_KEY:
+    if x_api_key != server_key:
         raise HTTPException(status_code=401, detail="Invalid API key")
+
 
 
 # ==================================================
