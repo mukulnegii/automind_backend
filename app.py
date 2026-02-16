@@ -1,238 +1,366 @@
-from flask import Flask, request, jsonify
-import numpy as np
-import pickle
+from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi.staticfiles import StaticFiles
+import shutil
+import json
 import os
-import requests
 
-app = Flask(__name__)
+from gtts import gTTS
+import numpy as np
+import pandas as pd
+import joblib
+import onnxruntime as ort
 
-# ==================================================
-# DIRECTORIES
-# ==================================================
-
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-MODEL_DIR = os.path.join(BASE_DIR, "models")
-
-os.makedirs(MODEL_DIR, exist_ok=True)
 
 # ==================================================
-# GOOGLE DRIVE FILE IDS
+# Global Latest Health Store
 # ==================================================
 
-DRIVE_MODELS = {
-    "automind_failure_model.pkl": "1iZOMnXwVzcfTkcqTWs1NtLv9iqTynd6B",
-    "automind_scaler.pkl": "1XV1WokgErZ5v0FCtzxIDAl7E0wKP1HjJ",
-    "rul_gb_model.pkl": "14huoYQWYoulSOHZmTun0Sul2mOz7pjaL",
-    "rul_rf_model.pkl": "1VFxAgLswIdH-GAaKkqe2GJO8wi5Lr_Gj",
-    "rul_scaler.pkl": "18AKnDnp4u_vVN8IWWVIiuh6izFNHJJ8z"
+LATEST_HEALTH = None
+
+
+# ==================================================
+# App Setup
+# ==================================================
+
+app = FastAPI(title="AutoMind AI Backend 🚗🤖")
+
+app.mount("/output", StaticFiles(directory="output"), name="output")
+
+UPLOAD_DIR = "uploads"
+OUTPUT_DIR = "output"
+MODEL_DIR = "models"
+
+os.makedirs(UPLOAD_DIR, exist_ok=True)
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+
+# ==================================================
+# Load Models
+# ==================================================
+
+print("🔄 Loading Models...")
+
+try:
+    failure_session = ort.InferenceSession("models/multi_failure_model.onnx")
+    print("✅ Failure Model Loaded")
+except:
+    failure_session = None
+    print("⚠️ Failure model not loaded")
+
+try:
+    rul_rf_session = ort.InferenceSession("models/rul_rf_model.onnx")
+    rul_gb_session = ort.InferenceSession("models/rul_gb_model.onnx")
+    print("✅ RUL Models Loaded")
+except:
+    rul_rf_session = None
+    rul_gb_session = None
+    print("⚠️ RUL models not loaded")
+
+try:
+    scaler = joblib.load("models/automind_scaler.pkl")
+    print("✅ Failure Scaler Loaded")
+except:
+    scaler = None
+    print("⚠️ Failure scaler not loaded")
+
+try:
+    rul_scaler = joblib.load("models/rul_scaler.pkl")
+    print("✅ RUL Scaler Loaded")
+except:
+    rul_scaler = None
+    print("⚠️ RUL scaler not loaded")
+
+
+# ==================================================
+# Feature Order
+# ==================================================
+
+FEATURES = [
+    "rpm",
+    "engine_temp",
+    "battery_voltage",
+    "speed",
+    "vibration",
+    "brake_pressure",
+    "gear_load"
+]
+
+RUL_FEATURES = [
+    "rpm",
+    "engine_temp",
+    "battery_voltage",
+    "speed",
+    "vibration",
+    "brake_pressure",
+    "gear_load",
+
+    "battery_health",
+    "degradation_index",
+    "failure_score",
+    "stress_score"
+]
+
+
+# ==================================================
+# Input Mapping
+# ==================================================
+
+FIELD_MAP = {
+    "rpm": "rpm",
+    "temperature": "engine_temp",
+    "engine_temp": "engine_temp",
+    "voltage": "battery_voltage",
+    "battery_voltage": "battery_voltage",
+    "speed": "speed",
+    "vibration": "vibration",
+    "pressure": "brake_pressure",
+    "brake_pressure": "brake_pressure",
+    "gear_load": "gear_load"
 }
 
 
+def map_fields(data: dict):
+
+    mapped = {}
+
+    for k, v in data.items():
+        if k in FIELD_MAP:
+            mapped[FIELD_MAP[k]] = float(v)
+
+    if "gear_load" not in mapped:
+        mapped["gear_load"] = 0.5
+
+    for f in FEATURES:
+        if f not in mapped:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Missing field: {f}"
+            )
+
+    return mapped
+
+
 # ==================================================
-# GOOGLE DRIVE DOWNLOAD (FIXED)
+# Helpers
 # ==================================================
 
-def get_confirm_token(response):
-    for key, value in response.cookies.items():
-        if key.startswith("download_warning"):
-            return value
-    return None
+def sigmoid(x):
+    return 1 / (1 + np.exp(-x))
 
 
-def download_from_drive(file_id, filename):
+# ==================================================
+# Failure Prediction
+# ==================================================
 
-    path = os.path.join(MODEL_DIR, filename)
+def predict_failure(X_scaled):
 
-    if os.path.exists(path):
-        print(f"✅ {filename} already exists")
-        return
+    if failure_session is None:
+        return 0.1, 0.1, 0.1, 0.1
 
-    print(f"⬇️ Downloading {filename}...")
+    input_name = failure_session.get_inputs()[0].name
 
-    URL = "https://drive.google.com/uc?export=download"
+    outputs = failure_session.run(None, {input_name: X_scaled})
 
-    session = requests.Session()
+    raw = np.array(outputs[0]).flatten()
 
-    response = session.get(URL, params={"id": file_id}, stream=True)
+    if len(raw) < 4:
+        return 0.2, 0.2, 0.2, 0.2
 
-    token = get_confirm_token(response)
+    probs = 1 / (1 + np.exp(-raw))
 
-    if token:
-        params = {
-            "id": file_id,
-            "confirm": token
+    engine_p = float(probs[0])
+    brake_p = float(probs[1])
+    battery_p = float(probs[2])
+    gear_p = float(probs[3])
+
+    return engine_p, brake_p, battery_p, gear_p
+
+
+# ==================================================
+# RUL Prediction
+# ==================================================
+
+def predict_rul(X_scaled):
+
+    if rul_rf_session is None or rul_gb_session is None:
+        return 180
+
+    rf_input = rul_rf_session.get_inputs()[0].name
+    gb_input = rul_gb_session.get_inputs()[0].name
+
+    rf_out = rul_rf_session.run(None, {rf_input: X_scaled})
+    gb_out = rul_gb_session.run(None, {gb_input: X_scaled})
+
+    rf_pred = float(np.array(rf_out).flatten()[0])
+    gb_pred = float(np.array(gb_out).flatten()[0])
+
+    rul = int(0.6 * rf_pred + 0.4 * gb_pred)
+
+    return max(30, rul)
+
+
+# ==================================================
+# Voice Assistant API
+# ==================================================
+
+@app.post("/voice")
+async def process_voice(file: UploadFile = File(...)):
+
+    input_path = f"{UPLOAD_DIR}/input.m4a"
+
+    with open(input_path, "wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
+
+    transcript = "My car is making strange noise"
+    emotion = "WORRIED"
+    diagnosis = "Engine problem"
+
+    ai_text = "Please slow down and visit the nearest service center."
+
+    response = {
+        "transcript": transcript,
+        "emotion": emotion,
+        "diagnosis": diagnosis,
+        "ai_response_text": ai_text,
+        "auto_booking": {
+            "status": "PENDING"
         }
-        response = session.get(URL, params=params, stream=True)
+    }
 
-    with open(path, "wb") as f:
-        for chunk in response.iter_content(32768):
-            if chunk:
-                f.write(chunk)
+    with open(f"{OUTPUT_DIR}/voice_agent_output.json", "w") as f:
+        json.dump(response, f, indent=2)
 
-    print(f"✅ Downloaded {filename}")
+    tts = gTTS(ai_text)
+    tts.save(f"{OUTPUT_DIR}/response_audio.mp3")
 
-
-# ==================================================
-# LOAD MODELS
-# ==================================================
-
-def load_models():
-
-    print("🔄 Preparing ML models...")
-
-    # Download all models
-    for name, fid in DRIVE_MODELS.items():
-        download_from_drive(fid, name)
-
-    models = {}
-
-    for name in DRIVE_MODELS.keys():
-
-        path = os.path.join(MODEL_DIR, name)
-
-        try:
-            print(f"📦 Loading {name}...")
-
-            with open(path, "rb") as f:
-                models[name] = pickle.load(f)
-
-            print(f"✅ Loaded {name}")
-
-        except Exception as e:
-            print(f"❌ Failed to load {name}: {e}")
-            raise e
-
-    return models
+    return {
+        "status": "success",
+        "json": "voice_agent_output.json",
+        "audio": "response_audio.mp3"
+    }
 
 
 # ==================================================
-# INIT MODELS
+# Prediction API Helpers
 # ==================================================
 
-try:
+def build_rul_array(df: pd.DataFrame):
 
-    models = load_models()
+    row = df.iloc[0]
 
-    failure_model = models["automind_failure_model.pkl"]
-    failure_scaler = models["automind_scaler.pkl"]
+    rpm = row["rpm"]
+    temp = row["engine_temp"]
+    volt = row["battery_voltage"]
+    speed = row["speed"]
+    vib = row["vibration"]
+    brake = row["brake_pressure"]
+    gear = row["gear_load"]
 
-    rul_gb_model = models["rul_gb_model.pkl"]
-    rul_rf_model = models["rul_rf_model.pkl"]
-    rul_scaler = models["rul_scaler.pkl"]
+    battery_health = 1 - (temp / 150)
+    degradation_index = vib * 0.4
+    failure_score = (temp / 120) * 0.5
+    stress_score = (speed / 150) * 0.6
 
-    print("🚀 All models ready")
+    return np.array([[
 
-except Exception as e:
+        rpm,
+        temp,
+        volt,
+        speed,
+        vib,
+        brake,
+        gear,
 
-    print("🔥 FATAL ERROR:", e)
-    exit(1)
+        battery_health,
+        degradation_index,
+        failure_score,
+        stress_score
+
+    ]], dtype=np.float32)
 
 
 # ==================================================
-# ROUTES
+# Prediction API
 # ==================================================
 
-@app.route("/")
+@app.post("/predict")
+def predict(data: dict):
+
+    mapped = map_fields(data)
+
+    df = pd.DataFrame([mapped], columns=FEATURES)
+
+    # Scale
+    if scaler:
+        X_scaled = scaler.transform(df).astype(np.float32)
+    else:
+        X_scaled = df.values.astype(np.float32)
+
+    # Failure
+    engine_p, brake_p, battery_p, gear_p = predict_failure(X_scaled)
+
+    final_risk = np.mean([engine_p, brake_p, battery_p, gear_p])
+
+    health_score = round((1 - final_risk) * 100, 2)
+
+    # RUL
+    if rul_scaler:
+        rul_array = build_rul_array(df)
+        rul_scaled = rul_scaler.transform(rul_array)
+    else:
+        rul_scaled = X_scaled
+
+    rul_days = predict_rul(rul_scaled)
+
+    # Risk Label
+    if final_risk > 0.6:
+        risk = "HIGH"
+    elif final_risk > 0.3:
+        risk = "MEDIUM"
+    else:
+        risk = "LOW"
+
+    result = {
+        "health_score": health_score,
+        "risk": risk,
+        "rul_days": rul_days,
+        "failure_probabilities": {
+            "engine": round(engine_p, 3),
+            "brake": round(brake_p, 3),
+            "battery": round(battery_p, 3),
+            "gear": round(gear_p, 3)
+        }
+    }
+
+    with open(f"{OUTPUT_DIR}/prediction_result.json", "w") as f:
+        json.dump(result, f, indent=2)
+
+    global LATEST_HEALTH
+    LATEST_HEALTH = result
+
+    return result
+
+
+# ==================================================
+# Health Check
+# ==================================================
+
+@app.get("/")
 def home():
-    return "AutoMind ML API Running 🚗🤖"
+    return {"status": "AutoMind Backend Running 🚀"}
 
 
 # ==================================================
-# FAILURE PREDICTION
+# Latest Health API
 # ==================================================
 
-@app.route("/predict/failure", methods=["POST"])
-def predict_failure():
+@app.get("/latest-health")
+def get_latest_health():
 
-    try:
+    if LATEST_HEALTH is None:
+        return {
+            "status": "empty",
+            "message": "No prediction yet"
+        }
 
-        data = request.get_json()
-
-        if "input" not in data:
-            return jsonify({"error": "Missing input"}), 400
-
-        arr = np.array(data["input"]).reshape(1, -1)
-
-        scaled = failure_scaler.transform(arr)
-
-        pred = int(failure_model.predict(scaled)[0])
-
-        prob = float(failure_model.predict_proba(scaled)[0].max())
-
-        return jsonify({
-            "failure": pred,
-            "confidence": round(prob, 3)
-        })
-
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
-# ==================================================
-# RUL GB
-# ==================================================
-
-@app.route("/predict/rul/gb", methods=["POST"])
-def predict_rul_gb():
-
-    try:
-
-        data = request.get_json()
-
-        if "input" not in data:
-            return jsonify({"error": "Missing input"}), 400
-
-        arr = np.array(data["input"]).reshape(1, -1)
-
-        scaled = rul_scaler.transform(arr)
-
-        rul = float(rul_gb_model.predict(scaled)[0])
-
-        return jsonify({
-            "rul_gb": round(rul, 2)
-        })
-
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
-# ==================================================
-# RUL RF
-# ==================================================
-
-@app.route("/predict/rul/rf", methods=["POST"])
-def predict_rul_rf():
-
-    try:
-
-        data = request.get_json()
-
-        if "input" not in data:
-            return jsonify({"error": "Missing input"}), 400
-
-        arr = np.array(data["input"]).reshape(1, -1)
-
-        scaled = rul_scaler.transform(arr)
-
-        rul = float(rul_rf_model.predict(scaled)[0])
-
-        return jsonify({
-            "rul_rf": round(rul, 2)
-        })
-
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-
-# ==================================================
-# MAIN
-# ==================================================
-
-if __name__ == "__main__":
-
-    port = int(os.environ.get("PORT", 10000))
-
-    app.run(
-        host="0.0.0.0",
-        port=port
-    )
+    return LATEST_HEALTH

@@ -1,0 +1,11 @@
+{
+  "health_score": 38.45,
+  "risk": "HIGH",
+  "rul_days": 1902,
+  "failure_probabilities": {
+    "engine": 0.731,
+    "brake": 0.731,
+    "battery": 0.5,
+    "gear": 0.5
+  }
+}

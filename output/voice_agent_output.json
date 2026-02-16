@@ -1,0 +1,9 @@
+{
+  "transcript": "My car is making strange noise",
+  "emotion": "WORRIED",
+  "diagnosis": "Engine problem",
+  "ai_response_text": "Please slow down and visit the nearest service center.",
+  "auto_booking": {
+    "status": "PENDING"
+  }
+}
