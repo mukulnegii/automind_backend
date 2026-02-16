@@ -61,44 +61,21 @@ app.mount("/output", StaticFiles(directory=OUTPUT_DIR), name="output")
 
 print("🔄 Loading Models...")
 
-# create lightweight session options (VERY IMPORTANT)
-so = ort.SessionOptions()
-so.intra_op_num_threads = 1
-so.inter_op_num_threads = 1
-so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_DISABLE_ALL
-
-
 try:
-    failure_session = ort.InferenceSession(
-        os.path.join(MODEL_DIR, "multi_failure_model.onnx"),
-        sess_options=so,
-        providers=["CPUExecutionProvider"]
-    )
+    failure_session = ort.InferenceSession(os.path.join(MODEL_DIR, "multi_failure_model.onnx"))
     print("✅ Failure Model Loaded")
 except:
     failure_session = None
     print("⚠️ Failure model not loaded")
 
-
 try:
-    rul_rf_session = ort.InferenceSession(
-        os.path.join(MODEL_DIR, "rul_rf_model.onnx"),
-        sess_options=so,
-        providers=["CPUExecutionProvider"]
-    )
-
-    rul_gb_session = ort.InferenceSession(
-        os.path.join(MODEL_DIR, "rul_gb_model.onnx"),
-        sess_options=so,
-        providers=["CPUExecutionProvider"]
-    )
-
+    rul_rf_session = ort.InferenceSession(os.path.join(MODEL_DIR, "rul_rf_model.onnx"))
+    rul_gb_session = ort.InferenceSession(os.path.join(MODEL_DIR, "rul_gb_model.onnx"))
     print("✅ RUL Models Loaded")
 except:
     rul_rf_session = None
     rul_gb_session = None
     print("⚠️ RUL models not loaded")
-
 
 try:
     scaler = joblib.load(os.path.join(MODEL_DIR, "automind_scaler.pkl"))
