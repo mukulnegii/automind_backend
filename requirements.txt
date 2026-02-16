@@ -9,3 +9,4 @@ speechrecognition
 pydub
 gtts
 scikit-learn
+pandas
